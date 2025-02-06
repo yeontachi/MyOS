@@ -6,6 +6,7 @@
 #include  <Protocol/SimpleFileSystem.h>
 #include  <Protocol/DiskIo2.h>
 #include  <Protocol/BlockIo.h>
+#include  <Guid/FileInfo.h>
 
 struct MemoryMap{
   UINTN buffer_size;
@@ -115,7 +116,7 @@ EFI_STATUS OpenRootDir(EFI_HANDLE image_handle, EFI_FILE_PROTOCOL** root){
 }
 
 EFI_STATUS EFIAPI UefiMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE* system_table){
-  Print(L"Hello, World!\n");//시작 메세지
+  Print(L"Hello, MyOS World!\n");//시작 메세지
 
   //메모리 맵 저장을 위한 버퍼 준비
   CHAR8 memmap_buf[4096 * 4]; //메모리 맵을 저장할 버퍼를 선언
@@ -136,8 +137,51 @@ EFI_STATUS EFIAPI UefiMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE* system_tab
   SaveMemoryMap(&memmap, memmap_file);
   memmap_file->Close(memmap_file);//저장 후 닫음
 
+  //####begin(read_kernel)####
+  EFI_FILE_PROTOCOL* kernel_file;// 커널 파일을 가리키는 핸들 역할
+  root_dir->Open(root_dir, &kernel_file, L"\\kernel.elf", EFI_FILE_MODE_READ, 0);//kernel.elf파일을 읽기 모드로 엶
+
+  UINTN file_info_size = sizeof(EFI_FILE_INFO) + sizeof(CHAR16)*12;  // 파일 정보를 저장할 버퍼 크기 정의
+  UINT8 file_info_buffer[file_info_size];                            // 파일 정보를 저장할 버퍼 선언
+  kernel_file->GetInfo(kernel_file, &gEfiFileInfoGuid, &file_info_size, file_info_buffer); //GetInfo를 호출해 kernel.elf 파일의 정보를 가져옴, gEfiFileInfoGuid : EFI_FILE_INFO를 요청하는 GUID
+
+  EFI_FILE_INFO* file_info = (EFI_FILE_INFO*)file_info_buffer;
+  UINTN kernel_file_size = file_info->FileSize;
+
+  EFI_PHYSICAL_ADDRESS kernel_base_addr = 0x100000;                                                               //커널을 로드할 메모리 주소를 0ㅌ100000(1MB 위치)로 설정 //일반적으로 1MB 이상의 영역은 운영체제 로딩을 위한 공간으로사용됨
+  gBS->AllocatePages(AllocateAddress, EfiLoaderData, (kernel_file_size + 0xfff) / 0x1000, &kernel_base_addr);     //메모리를 할당하는 함수 kernel_base_addr에 메모리 할당, 메모리 타입으로 로더 데이터로 설정, 페이지 수 계산(4KB단위 메모리 할당, + 0xfff를 더해서 올림연산 수행), 할당된 메모리의 시작주소를 kernel_base_addr에 저장
+  kernel_file->Read(kernel_file, &kernel_file_size, (VOID*)kernel_base_addr);                                     //kernel.elf 파일 내용을 읽어 메모리(kernel_base_addr)로 복사. kernel_file_size만큼 읽음
+  Print(L"Kernel: 0x%0lx (%lu bytes)\n", kernel_base_addr, kernel_file_size);                                     //커널이 로드된 주소와 크기 출력
+  //####end(read_kernel)####
+
+  //####begin(exit_bs)####
+  EFI_STATUS status;
+  status = gBS->ExitBootServices(image_handle, memmap.map_key);                     //ExitBootServices를 호출하면 UEFI의 모든 부트 서비스가 종료됨, 이후에는 UEFI 관련 API를 사용할 수 없음
+  if(EFI_ERROR(status)){                                                            //실패하면 다시 호출
+    status = GetMemoryMap(&memmap);                                                 //최신 메모리 맵을 다시 가져오고 다시 호출 > 그래도 실패하면 무한 루프
+    if(EFI_ERROR(status)){                                                          //실패 이유? : memmap.map_key가 변경되었을 가능성 존재...그래서 다시 최신 메모리맵을 가져온 후 다시 Exit호출
+      Print(L"failed to get memory map: %r\n", status);
+      while(1);
+    }
+    status = gBS->ExitBootServices(image_handle, memmap.map_key);
+    if(EFI_ERROR(status)){
+      Print(L"Could not exit boot service: %r\n", status);
+      while(1);
+    }
+  }
+  //####end(exit_bs)####
+
+  //####begin(call_kernel)####
+  UINT64 entry_addr = *(UINT64*)(kernel_base_addr + 24);                           //커널 ELF파일에서 엔트리 포인트 주소를 가져옴  kernel_base_addr + 24는 ELF헤더의 e_entry필드(엔트리 포인트 주소)를 의미
+
+  typedef void EntryPointType(void);                                               //EntryPointType은 반환값과 인자가 없는 함수 타입을 정의                           
+  EntryPointType* entry_point = (EntryPointType*)entry_addr;                       //entry_addr를 함수 포인터(entry_point)로 캐스팅
+  entry_point();                                                                   //entry_point()를 호출하여 커널을 실행  
+  //####end(call_kernel)####
+
   //실행 완료 메세지 및 무한 루프
   Print(L"All done\n");
   while(1);
+
   return EFI_SUCCESS;
 }
