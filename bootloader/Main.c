@@ -2,6 +2,7 @@
 #include  <Library/UefiLib.h>
 #include  <Library/UefiBootServicesTableLib.h>
 #include  <Library/PrintLib.h>
+#include  <Library/MemoryAllocationLib.h>
 #include  <Protocol/LoadedImage.h>
 #include  <Protocol/SimpleFileSystem.h>
 #include  <Protocol/DiskIo2.h>
@@ -26,7 +27,7 @@ EFI_STATUS GetMemoryMap(struct MemoryMap* map){
     return gBS->GetMemoryMap( //gBS(Global Boot Services), 현재 시스템의 메모리 맵 정보를 반환
         &map->map_size,
         (EFI_MEMORY_DESCRIPTOR*)map->buffer,
-        &map->map_size,
+        &map->map_key,
         &map->descriptor_size,
         &map->descriptor_version);
 }
@@ -57,12 +58,16 @@ const CHAR16* GetMemoryTypeUnicode(EFI_MEMORY_TYPE type) {
 //EFI_FILE_PROTOCOL* file : UEFI 파일 시스템에 접근할 수 있는 포인터
 EFI_STATUS SaveMemoryMap(struct MemoryMap* map, EFI_FILE_PROTOCOL* file){
   //CSV 파일의 헤더 저장
+  EFI_STATUS status;
   CHAR8 buf[256]; //ASCII 문자열 버퍼 (한 줄의 데이터를 저장)
   UINTN len;      //데이터 길이를 저장할 변수
 
   CHAR8* header = "Index, Type, Type(name), PhysicalStart, NumberOfPages, Attribute\n";
   len = AsciiStrLen(header);
-  file->Write(file, &len, header);  //헤더 라인을 출력(헤더 라인을 기록해 두면 CSV파일을 열었을 때 열의 의미를 알기 쉽다)
+  status = file->Write(file, &len, header);  //헤더 라인을 출력(헤더 라인을 기록해 두면 CSV파일을 열었을 때 열의 의미를 알기 쉽다)
+  if(EFI_ERROR(status)){
+    return status;
+  }
 
   Print(L"map->buffer = %08lx, map->map_size = %08lx\n", map->buffer, map->map_size);// 메모리 맵이 저장된 버퍼의 시작 주소와 크기를 출력하여 디버깅용 로그로 활용
 
@@ -83,7 +88,10 @@ EFI_STATUS SaveMemoryMap(struct MemoryMap* map, EFI_FILE_PROTOCOL* file){
       i, desc->Type, GetMemoryTypeUnicode(desc->Type),
       desc->PhysicalStart, desc->NumberOfPages,
       desc->Attribute & 0xffffflu);
-    file->Write(file, &len, buf);//변환된 문자열을 파일에 기록하여 메모리 맵 정보를 memmap 파일에 저장
+    status = file->Write(file, &len, buf);//변환된 문자열을 파일에 기록하여 메모리 맵 정보를 memmap 파일에 저장
+    if(EFI_ERROR(status)){
+      return status;
+    }
   }
 
   return EFI_SUCCESS;// 파일 저장이 성공적으로 완료되면 EFI_SUCCESS 반환
@@ -91,82 +99,197 @@ EFI_STATUS SaveMemoryMap(struct MemoryMap* map, EFI_FILE_PROTOCOL* file){
 
 //EFI 파일 시스템에서 루트 디렉토리를 가져오는 함수
 EFI_STATUS OpenRootDir(EFI_HANDLE image_handle, EFI_FILE_PROTOCOL** root){
+  EFI_STATUS status;
   EFI_LOADED_IMAGE_PROTOCOL* loaded_image; //현재 실행 중인 UEFI애플리케이션 정보를 담고 있음
   EFI_SIMPLE_FILE_SYSTEM_PROTOCOL* fs;     //현재 실행 중인 EFI 애플리케이션이 저장된 디스크에서 파일 시스템(fs) 핸들을 가져옴
 
-  gBS->OpenProtocol(
+  status = gBS->OpenProtocol(
     image_handle,
     &gEfiLoadedImageProtocolGuid,
     (VOID**)&loaded_image,
     image_handle,
     NULL,
     EFI_OPEN_PROTOCOL_BY_HANDLE_PROTOCOL);
+  if(EFI_ERROR(status)){
+    return status;
+  }
 
-  gBS->OpenProtocol(
+  status = gBS->OpenProtocol(
     loaded_image->DeviceHandle,
     &gEfiSimpleFileSystemProtocolGuid,
     (VOID**)&fs,
     image_handle,
     NULL,
     EFI_OPEN_PROTOCOL_BY_HANDLE_PROTOCOL);
+  if (EFI_ERROR(status)){
+    return status;
+  }
 
-  fs->OpenVolume(fs, root); //루트 디렉토리 열기(root)
+  return fs->OpenVolume(fs, root); //루트 디렉토리 열기(root)
+}
+
+EFI_STATUS OpenGOP(EFI_HANDLE image_handle, EFI_GRAPHICS_OUTPUT_PROTOCOL** gop){
+  EFI_STATUS status;
+  UINTN num_gop_handles = 0;
+  EFI_HANDLE* gop_handles = NULL;
+
+  status = gBS->LocateHandleBuffer(
+    ByProtocol,
+    &gEfiGraphicsOutputProtocolGuid,
+    NULL,
+    &num_gop_handles,
+    &gop_handles);
+  if (EFI_ERROR(status)){
+    return status;
+  }
+
+  status = gBS->OpenProtocol(
+    gop_handles[0],
+    &gEfiGraphicsOutputProtocolGuid,
+    (VOID**)gop,
+    image_handle,
+    NULL,
+    EFI_OPEN_PROTOCOL_BY_HANDLE_PROTOCOL);
+  if (EFI_ERROR(status)){
+    return status;
+  }
+
+  FreePool(gop_handles);
 
   return EFI_SUCCESS;
 }
 
+const CHAR16* GetPixelFormatUnicode(EFI_GRAPHICS_PIXEL_FORMAT fmt){
+  switch(fmt){
+    case PixelRedGreenBlueReserved8BitPerColor:
+      return L"PixelRedGreenBlueReserved8BitPerColor";
+    case PixelBlueGreenRedReserved8BitPerColor:
+      return L"PixelBlueGreenRedReserved8BitPerColor";
+    case PixelBitMask:
+      return L"PixelBitMask";
+    case PixelBltOnly:
+      return L"PixelBltOnly";
+    case PixelFormatMax:
+      return L"PixelFormatMax";
+    default:
+      return L"InvalidPixelFormat";
+  }
+}
+
+void Halt(void){
+  while(1) __asm__("hlt");
+}
+
 EFI_STATUS EFIAPI UefiMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE* system_table){
+  EFI_STATUS status;
+
   Print(L"Hello, MyOS World!\n");//시작 메세지
 
   //메모리 맵 저장을 위한 버퍼 준비
   CHAR8 memmap_buf[4096 * 4]; //메모리 맵을 저장할 버퍼를 선언
   struct MemoryMap memmap = {sizeof(memmap_buf), memmap_buf, 0, 0, 0, 0};
-  GetMemoryMap(&memmap); //메모리 맵 정보 획득
-
+  status = GetMemoryMap(&memmap); //메모리 맵 정보 획득
+  if (EFI_ERROR(status)){
+    Print(L"failed to get memory map: %r\n", status);
+    Halt();
+  }
   //루트 디렉토리 열기
   EFI_FILE_PROTOCOL* root_dir;
-  OpenRootDir(image_handle, &root_dir); //UEFI 파일 시스템 루트 디렉토리 핸들을 가져옴
+  status = OpenRootDir(image_handle, &root_dir); //UEFI 파일 시스템 루트 디렉토리 핸들을 가져옴
+  if (EFI_ERROR(status)){
+    Print(L"failed to open root directory: %r\n", status);
+    Halt();
+  }
 
   //memmap 파일 생성
   EFI_FILE_PROTOCOL* memmap_file;
-  root_dir->Open(       // 파일 시스템 루트 디렉토리에 memmap 파일 생성
+  status = root_dir->Open(       // 파일 시스템 루트 디렉토리에 memmap 파일 생성
     root_dir, &memmap_file, L"\\memmap",
     EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE, 0);
-  
-  //메모리 맵을 memmap 파일에 저장
-  SaveMemoryMap(&memmap, memmap_file);
-  memmap_file->Close(memmap_file);//저장 후 닫음
+  if (EFI_ERROR(status)){
+    Print(L"failed to open file '\\memmap': %r\n", status);
+    Print(L"Ignored,\n");
+  } else{
+    status = SaveMemoryMap(&memmap, memmap_file);
+    if(EFI_ERROR(status)){
+      Print(L"failed to save memory map: %r\n", status);
+      Halt();
+    }
+    status = memmap_file->Close(memmap_file);
+    if(EFI_ERROR(status)){
+      Print(L"failed to close memory map: %r\n", status);
+      Halt();
+    }
+  }
+
+  EFI_GRAPHICS_OUTPUT_PROTOCOL* gop;
+  status = OpenGOP(image_handle, &gop);
+  if(EFI_ERROR(status)){
+    Print(L"failed to open GOP: %r\n", status);
+    Halt();
+  }
+  Print(L"Resolution: %ux%u, Pixel Format: %s, %u pixels/line\n",
+      gop->Mode->Info->HorizontalResolution,
+      gop->Mode->Info->VerticalResolution,
+      GetPixelFormatUnicode(gop->Mode->Info->PixelFormat),
+      gop->Mode->Info->PixelsPerScanLine);
+  Print(L"Frame Buffer: 0x%0lx - 0x%0lx, Size: %lu bytes\n",
+      gop->Mode->FrameBufferBase,
+      gop->Mode->FrameBufferBase + gop->Mode->FrameBufferSize,
+      gop->Mode->FrameBufferSize);
+
+  UINT8* frame_buffer = (UINT8*)gop->Mode->FrameBufferBase;
+  for(UINTN i = 0; i < gop->Mode->FrameBufferSize; ++i){
+    frame_buffer[i] = 255;
+  }
 
   //####begin(read_kernel)####
   EFI_FILE_PROTOCOL* kernel_file;// 커널 파일을 가리키는 핸들 역할
-  root_dir->Open(root_dir, &kernel_file, L"\\kernel.elf", EFI_FILE_MODE_READ, 0);//kernel.elf파일을 읽기 모드로 엶
+  status = root_dir->Open(root_dir, &kernel_file, L"\\kernel.elf", EFI_FILE_MODE_READ, 0);//kernel.elf파일을 읽기 모드로 엶
+  if(EFI_ERROR(status)){
+    Print(L"failed to open file '\\kernel.elf': %r\n", status);
+    Halt();
+  }
 
   UINTN file_info_size = sizeof(EFI_FILE_INFO) + sizeof(CHAR16)*12;  // 파일 정보를 저장할 버퍼 크기 정의
   UINT8 file_info_buffer[file_info_size];                            // 파일 정보를 저장할 버퍼 선언
-  kernel_file->GetInfo(kernel_file, &gEfiFileInfoGuid, &file_info_size, file_info_buffer); //GetInfo를 호출해 kernel.elf 파일의 정보를 가져옴, gEfiFileInfoGuid : EFI_FILE_INFO를 요청하는 GUID
+  status = kernel_file->GetInfo(kernel_file, &gEfiFileInfoGuid, &file_info_size, file_info_buffer); //GetInfo를 호출해 kernel.elf 파일의 정보를 가져옴, gEfiFileInfoGuid : EFI_FILE_INFO를 요청하는 GUID
+  if(EFI_ERROR(status)){
+    Print(L"failed to get file information: %r\n", status);
+    Halt();
+  }
 
   EFI_FILE_INFO* file_info = (EFI_FILE_INFO*)file_info_buffer;
   UINTN kernel_file_size = file_info->FileSize;
 
   EFI_PHYSICAL_ADDRESS kernel_base_addr = 0x100000;                                                               //커널을 로드할 메모리 주소를 0ㅌ100000(1MB 위치)로 설정 //일반적으로 1MB 이상의 영역은 운영체제 로딩을 위한 공간으로사용됨
-  gBS->AllocatePages(AllocateAddress, EfiLoaderData, (kernel_file_size + 0xfff) / 0x1000, &kernel_base_addr);     //메모리를 할당하는 함수 kernel_base_addr에 메모리 할당, 메모리 타입으로 로더 데이터로 설정, 페이지 수 계산(4KB단위 메모리 할당, + 0xfff를 더해서 올림연산 수행), 할당된 메모리의 시작주소를 kernel_base_addr에 저장
-  kernel_file->Read(kernel_file, &kernel_file_size, (VOID*)kernel_base_addr);                                     //kernel.elf 파일 내용을 읽어 메모리(kernel_base_addr)로 복사. kernel_file_size만큼 읽음
+  status = gBS->AllocatePages(AllocateAddress, EfiLoaderData, (kernel_file_size + 0xfff) / 0x1000, &kernel_base_addr);     //메모리를 할당하는 함수 kernel_base_addr에 메모리 할당, 메모리 타입으로 로더 데이터로 설정, 페이지 수 계산(4KB단위 메모리 할당, + 0xfff를 더해서 올림연산 수행), 할당된 메모리의 시작주소를 kernel_base_addr에 저장
+  if(EFI_ERROR(status)){
+    Print(L"failed to allocate pages: %r", status);
+    Halt();
+  }
+  
+  status = kernel_file->Read(kernel_file, &kernel_file_size, (VOID*)kernel_base_addr);                                     //kernel.elf 파일 내용을 읽어 메모리(kernel_base_addr)로 복사. kernel_file_size만큼 읽음
+  if(EFI_ERROR(status)){
+    Print(L"error: %r", status);
+    Halt();
+  }
   Print(L"Kernel: 0x%0lx (%lu bytes)\n", kernel_base_addr, kernel_file_size);                                     //커널이 로드된 주소와 크기 출력
   //####end(read_kernel)####
 
   //####begin(exit_bs)####
-  EFI_STATUS status;
   status = gBS->ExitBootServices(image_handle, memmap.map_key);                     //ExitBootServices를 호출하면 UEFI의 모든 부트 서비스가 종료됨, 이후에는 UEFI 관련 API를 사용할 수 없음
   if(EFI_ERROR(status)){                                                            //실패하면 다시 호출
+    //최신 메모리 맵 가져오기
     status = GetMemoryMap(&memmap);                                                 //최신 메모리 맵을 다시 가져오고 다시 호출 > 그래도 실패하면 무한 루프
     if(EFI_ERROR(status)){                                                          //실패 이유? : memmap.map_key가 변경되었을 가능성 존재...그래서 다시 최신 메모리맵을 가져온 후 다시 Exit호출
       Print(L"failed to get memory map: %r\n", status);
-      while(1);
+      Halt();
     }
     status = gBS->ExitBootServices(image_handle, memmap.map_key);
     if(EFI_ERROR(status)){
       Print(L"Could not exit boot service: %r\n", status);
-      while(1);
+      Halt();
     }
   }
   //####end(exit_bs)####
@@ -174,14 +297,14 @@ EFI_STATUS EFIAPI UefiMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE* system_tab
   //####begin(call_kernel)####
   UINT64 entry_addr = *(UINT64*)(kernel_base_addr + 24);                           //커널 ELF파일에서 엔트리 포인트 주소를 가져옴  kernel_base_addr + 24는 ELF헤더의 e_entry필드(엔트리 포인트 주소)를 의미
 
-  typedef void EntryPointType(void);                                               //EntryPointType은 반환값과 인자가 없는 함수 타입을 정의                           
+  typedef void EntryPointType(UINT64, UINT64);                                               //EntryPointType은 반환값과 인자가 없는 함수 타입을 정의                           
   EntryPointType* entry_point = (EntryPointType*)entry_addr;                       //entry_addr를 함수 포인터(entry_point)로 캐스팅
-  entry_point();                                                                   //entry_point()를 호출하여 커널을 실행  
+  entry_point(gop->Mode->FrameBufferBase, gop->Mode->FrameBufferSize);                                                                   //entry_point()를 호출하여 커널을 실행  
   //####end(call_kernel)####
 
   //실행 완료 메세지 및 무한 루프
   Print(L"All done\n");
+  
   while(1);
-
   return EFI_SUCCESS;
 }
