@@ -8,6 +8,7 @@
 #include  <Protocol/DiskIo2.h>
 #include  <Protocol/BlockIo.h>
 #include  <Guid/FileInfo.h>
+#include "frame_buffer_config.hpp"
 
 struct MemoryMap{
   UINTN buffer_size;
@@ -297,9 +298,29 @@ EFI_STATUS EFIAPI UefiMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE* system_tab
   //####begin(call_kernel)####
   UINT64 entry_addr = *(UINT64*)(kernel_base_addr + 24);                           //커널 ELF파일에서 엔트리 포인트 주소를 가져옴  kernel_base_addr + 24는 ELF헤더의 e_entry필드(엔트리 포인트 주소)를 의미
 
-  typedef void EntryPointType(UINT64, UINT64);                                               //EntryPointType은 반환값과 인자가 없는 함수 타입을 정의                           
+  struct FrameBufferConfig config = {
+    (UINT8*)gop->Mode->FrameBufferBase,
+    gop->Mode->Info->PixelsPerScanLine,
+    gop->Mode->Info->HorizontalResolution,
+    gop->Mode->Info->VerticalResolution,
+    0
+  };
+
+  switch(gop->Mode->Info->PixelFormat){
+    case PixelRedGreenBlueReserved8BitPerColor:
+      config.pixel_format = kPixelRGBResv8BitPerColor;
+      break;
+    case PixelBlueGreenRedReserved8BitPerColor:
+      config.pixel_format = kPixelBGRResv8BitPerColor;
+      break;
+    default:
+      Print(L"Unimplemented pixel format: %d\n", gop->Mode->Info->PixelFormat);
+      Halt();
+  }
+
+  typedef void EntryPointType(const struct FrameBufferConfig*);                                               //EntryPointType은 반환값과 인자가 없는 함수 타입을 정의                           
   EntryPointType* entry_point = (EntryPointType*)entry_addr;                       //entry_addr를 함수 포인터(entry_point)로 캐스팅
-  entry_point(gop->Mode->FrameBufferBase, gop->Mode->FrameBufferSize);                                                                   //entry_point()를 호출하여 커널을 실행  
+  entry_point(&config);                                                                   //entry_point()를 호출하여 커널을 실행  
   //####end(call_kernel)####
 
   //실행 완료 메세지 및 무한 루프
